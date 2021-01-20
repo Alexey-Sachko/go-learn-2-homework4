@@ -49,6 +49,26 @@ func NewBizService() BizServer {
 	return service
 }
 
+func authStreamInterceptor(acl map[string][]string) grpc.StreamServerInterceptor {
+	return func(
+		srv interface{},
+		ss grpc.ServerStream,
+		info *grpc.StreamServerInfo,
+		handler grpc.StreamHandler,
+	) error {
+		if !guard(ss.Context(), acl, info.FullMethod) {
+			return grpc.Errorf(codes.Unauthenticated, "Unauthenticated")
+		}
+
+		err := handler(srv, ss)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	}
+}
+
 func authInterceptor(acl map[string][]string) grpc.UnaryServerInterceptor {
 	return func(
 		ctx context.Context,
@@ -58,51 +78,57 @@ func authInterceptor(acl map[string][]string) grpc.UnaryServerInterceptor {
 	) (interface{}, error) {
 		// start := time.Now()
 
-		md, _ := metadata.FromIncomingContext(ctx)
-
-		consumers := md.Get("consumer")
-		if len(consumers) == 0 {
-			return nil, grpc.Errorf(codes.Unauthenticated, "Unauthenticated")
-		}
-
-		cons := consumers[0]
-		consMethods, ok := acl[cons]
-		if !ok {
-			return nil, grpc.Errorf(codes.Unauthenticated, "Unauthenticated")
-		}
-
-		allowed := false
-		for _, m := range consMethods {
-			// fmt.Println("allowed calc: ", info.FullMethod, m)
-
-			if strings.Contains(m, "/*") {
-				if strings.Contains(info.FullMethod, strings.Replace(m, "/*", "", -1)) {
-					allowed = true
-					break
-				}
-			} else if info.FullMethod == m {
-				allowed = true
-				break
-			}
-		}
-
-		if !allowed {
+		auth := guard(ctx, acl, info.FullMethod)
+		if !auth {
 			return nil, grpc.Errorf(codes.Unauthenticated, "Unauthenticated")
 		}
 
 		reply, err := handler(ctx, req)
 
-	// 	fmt.Printf(`
-	// info.FullMethod = %v
-	// req = %#v
-	// reply = %#v
-	// time = %v
-	// md = %v
-	// err = %v
-	// `, info.FullMethod, req, reply, time.Since(start), md, err)
+		// 	fmt.Printf(`
+		// info.FullMethod = %v
+		// req = %#v
+		// reply = %#v
+		// time = %v
+		// md = %v
+		// err = %v
+		// `, info.FullMethod, req, reply, time.Since(start), md, err)
 
 		return reply, err
 	}
+}
+
+func guard(ctx context.Context, acl map[string][]string, method string) bool {
+	md, _ := metadata.FromIncomingContext(ctx)
+	consumers := md.Get("consumer")
+	if len(consumers) == 0 {
+		return false
+	}
+
+	cons := consumers[0]
+	consMethods, ok := acl[cons]
+	if !ok {
+		return false
+	}
+
+	allowed := false
+	for _, m := range consMethods {
+		if strings.Contains(m, "/*") {
+			if strings.Contains(method, strings.Replace(m, "/*", "", -1)) {
+				allowed = true
+				break
+			}
+		} else if method == m {
+			allowed = true
+			break
+		}
+	}
+
+	if !allowed {
+		return false
+	}
+
+	return true
 }
 
 func StartMyMicroservice(ctx context.Context, addr string, ACLData string) error {
@@ -118,6 +144,7 @@ func StartMyMicroservice(ctx context.Context, addr string, ACLData string) error
 
 	server := grpc.NewServer(
 		grpc.UnaryInterceptor(authInterceptor(acl)),
+		grpc.StreamInterceptor(authStreamInterceptor(acl)),
 	)
 	RegisterAdminServer(server, NewAdminService())
 	RegisterBizServer(server, NewBizService())
